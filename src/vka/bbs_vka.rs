@@ -340,7 +340,7 @@ pub fn vka_verify_mac(
 #[cfg(test)]
 mod bbs_vka_tests {
     use ark_std::rand::{rngs::StdRng, SeedableRng};
-    use akvac::vka::bbs_vka::*;
+    use crate::vka::bbs_vka::*;
 
     #[test]
     fn full_bbs_vka_flow_test() -> anyhow::Result<()> {
