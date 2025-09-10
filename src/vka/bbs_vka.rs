@@ -86,7 +86,7 @@ pub enum VkaError {
 /// - witness (r, e) to pass to the predicate
 #[derive(Clone, Debug)]
 pub struct PresentResult {
-    pub vkapres: VkaPres,
+    pub vka_pres: VkaPres,
     pub C_j_vec: Vec<Point>,
     pub xi_vec: Vec<Scalar>,
     pub witness_r: Scalar,
@@ -253,7 +253,7 @@ pub fn vka_present<R: RngCore + CryptoRng>(
     }
 
     Ok(PresentResult {
-        vkapres: VkaPres { C_A, T },
+        vka_pres: VkaPres { C_A, T },
         C_j_vec: C_j_vec,
         xi_vec: xi_vec,
         witness_r: r,
@@ -371,7 +371,7 @@ mod bbs_vka_tests {
         let ok_pred = vka_predicate(
             &pk,
             &params,
-            &pres.vkapres,
+            &pres.vka_pres,
             &pres.witness_r,
             &pres.witness_e,
             &pres.xi_vec,
@@ -379,7 +379,7 @@ mod bbs_vka_tests {
         assert!(ok_pred, "predicate failed");
 
         // 7) Issuer verification (MAC verify on randomized commitments)
-        let ok = vka_verify(&sk, &params, &pres.vkapres, &pres.C_j_vec)?;
+        let ok = vka_verify(&sk, &params, &pres.vka_pres, &pres.C_j_vec)?;
         assert!(ok, "verification failed");
 
         // 8) Issuer MAC verify on original (A,e,M)

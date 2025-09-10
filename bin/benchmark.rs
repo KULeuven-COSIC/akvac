@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     let ok_pred = vka_predicate(
         &pk,
         &params,
-        &pres.vkapres,
+        &pres.vka_pres,
         &pres.witness_r,
         &pres.witness_e,
         &pres.xi_vec,
@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     assert!(ok_pred, "predicate failed");
 
     // 7) Issuer verification (MAC verify on randomized commitments)
-    let ok = vka_verify(&sk, &params, &pres.vkapres, &pres.C_j_vec)?;
+    let ok = vka_verify(&sk, &params, &pres.vka_pres, &pres.C_j_vec)?;
     assert!(ok, "verification failed");
 
     // 8) Issuer MAC verify on original (A,e,M)
