@@ -1,7 +1,8 @@
 // use std::ops::{Mul, Sub};
 // use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ec::{PrimeGroup};
-use ark_ed25519::{Fr as ScalarField, EdwardsProjective as G};// FrConfig, Fr, EdwardsProjective};
+use ark_ed25519::{Fr as ScalarField, EdwardsProjective as G};
+// FrConfig, Fr, EdwardsProjective};
 // use ark_ff::{BigInteger, Field, Fp256, MontBackend, PrimeField};
 use ark_ff::{Field, PrimeField};
 use ark_serialize::CanonicalSerialize;
@@ -13,6 +14,8 @@ use sha2::Digest;
 /// Handy aliases
 pub type Scalar = ScalarField;
 pub type Point = G;
+
+const PROT_NAME_MAC: &[u8] = b"AKVAC-BBSVKA-MAC";
 
 /// Internal helper: scalar-multiply a point.
 #[inline]
@@ -47,18 +50,11 @@ pub struct PublicKey {
     pub Y_vec: Vec<Point>, // Y_j = y_j * G_j
 }
 
-/// INSECURE placeholder proof — replace with a real NIZK!
-/// TODO: implement a real proof
-#[derive(Clone, Debug)]
-pub struct Proof {
-    pub digest: [u8; 32],
-}
-
 #[derive(Clone, Debug)]
 pub struct Signature {
     pub A: Point,
     pub e: Scalar,
-    pub proof: Proof,
+    pub proof: MacProof,
 }
 
 /// Output of presentation
@@ -66,6 +62,16 @@ pub struct Signature {
 pub struct VkaPres {
     pub C_A: Point,
     pub T: Point,
+}
+
+/// Schnorr-style NIZK for BBS-VKA MAC correctness (Fiat–Shamir)
+#[derive(Clone, Debug)]
+pub struct MacProof {
+    pub c: Scalar,
+    // challenge
+    pub s_x: Scalar,
+    // response for x
+    pub s_y_vec: Vec<Scalar>, // responses for y_1..y_l
 }
 
 
@@ -91,6 +97,144 @@ pub struct PresentResult {
     pub xi_vec: Vec<Scalar>,
     pub witness_r: Scalar,
     pub witness_e: Scalar,
+}
+
+
+#[inline]
+fn hash_to_scalar(bytes: &[u8]) -> Scalar {
+    let d = Sha256::digest(bytes);
+    // Arkworks Fr: reduce 32 bytes mod field order
+    Scalar::from_le_bytes_mod_order(&d)
+}
+
+fn hash_challenge_mac(
+    // statement
+    X: &Point,
+    Y_vec: &[Point],
+    eA_minus_G0: &Point,
+    // announcement
+    T1: &Point,
+    T2_vec: &[Point],
+    T3: &Point,
+) -> Scalar {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(PROT_NAME_MAC);
+
+    // statement
+    X.serialize_compressed(&mut buf).unwrap();
+    for Yj in Y_vec {
+        Yj.serialize_compressed(&mut buf).unwrap();
+    }
+    eA_minus_G0.serialize_compressed(&mut buf).unwrap();
+
+    // announcement
+    T1.serialize_compressed(&mut buf).unwrap();
+    for t2j in T2_vec {
+        t2j.serialize_compressed(&mut buf).unwrap();
+    }
+    T3.serialize_compressed(&mut buf).unwrap();
+
+    hash_to_scalar(&buf)
+}
+
+/// Prover for \nizkbbsvka:
+/// Statement  : (X, (Y_j)_{j=1..l}, eA - G0)
+/// Witness    : (x, (y_j)_{j=1..l})
+/// Homomorph. : (x,y)->(xG, (y_j G_j),  -xA + Σ y_j M_j)
+fn nizk_prove_bbsvka<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    params: &Params,
+    pk: &PublicKey,
+    A: &Point,
+    e: &Scalar,
+    messages: &[Point],
+    sk: &SecretKey,
+) -> MacProof {
+    let l = params.G_vec.len();
+    debug_assert_eq!(messages.len(), l);
+    debug_assert_eq!(sk.y_vec.len(), l);
+    debug_assert_eq!(pk.Y_vec.len(), l);
+
+    // 1) Sample a = (a_x, a_y1..a_yl)
+    let a_x = Scalar::rand(rng);
+    let mut a_y_vec = Vec::with_capacity(l);
+    for _ in 0..l {
+        a_y_vec.push(Scalar::rand(rng));
+    }
+
+    // 2) Announcement T = φ(a)
+    // T1 = a_x * G
+    let T1 = smul(&params.G, &a_x);
+    // T2_j = a_yj * G_j
+    let mut T2_vec = Vec::with_capacity(l);
+    for j in 0..l {
+        T2_vec.push(smul(&params.G_vec[j], &a_y_vec[j]));
+    }
+    // T3 = - a_x * A + Σ a_yj * M_j
+    let mut T3 = -smul(A, &a_x);
+    for j in 0..l {
+        T3 += smul(&messages[j], &a_y_vec[j]);
+    }
+
+    // Statement: S = (X, Y_vec, eA - G0)
+    let mut eA_minus_G0 = smul(A, e);
+    eA_minus_G0 -= params.pp_vka;
+
+    // 3) c = H(ProtName, statement, announcement)
+    let c = hash_challenge_mac(&pk.X, &pk.Y_vec, &eA_minus_G0, &T1, &T2_vec, &T3);
+
+    // 4) s = a + c * witness  (entry-wise)
+    let s_x = a_x + c * sk.x;
+    let mut s_y_vec = Vec::with_capacity(l);
+    for j in 0..l {
+        s_y_vec.push(a_y_vec[j] + c * sk.y_vec[j]);
+    }
+
+    MacProof { c, s_x, s_y_vec }
+}
+
+/// Verifier for \nizkbbsvka
+fn nizk_verify_bbsvka(
+    params: &Params,
+    pk: &PublicKey,
+    A: &Point,
+    e: &Scalar,
+    messages: &[Point],
+    proof: &MacProof,
+) -> bool {
+    let l = params.G_vec.len();
+    if messages.len() != l || pk.Y_vec.len() != l || proof.s_y_vec.len() != l {
+        println!("Length mismatch in nizk_verify_bbsvka");
+        return false;
+    }
+
+    // Statement: S = (X, Y_vec, eA - G0)
+    let mut eA_minus_G0 = smul(A, e);
+    eA_minus_G0 -= params.pp_vka;
+
+    // Recompute accepting announcement  T' = φ(s) - c * S
+    // φ(s): (s_x G, (s_yj G_j),  - s_x A + Σ s_yj M_j)
+    let T1_s = smul(&params.G, &proof.s_x);
+    let mut T2_s_vec = Vec::with_capacity(l);
+    for j in 0..l {
+        T2_s_vec.push(smul(&params.G_vec[j], &proof.s_y_vec[j]));
+    }
+    let mut T3_s = -smul(A, &proof.s_x);
+    for j in 0..l {
+        T3_s += smul(&messages[j], &proof.s_y_vec[j]);
+    }
+
+    // subtract c*S
+    let T1 = T1_s - smul(&pk.X, &proof.c);
+    let mut T2_vec = Vec::with_capacity(l);
+    for j in 0..l {
+        T2_vec.push(T2_s_vec[j] - smul(&pk.Y_vec[j], &proof.c));
+    }
+    let T3 = T3_s - smul(&eA_minus_G0, &proof.c);
+
+    // c' = H(ProtName, statement, T')
+    let c_prime = hash_challenge_mac(&pk.X, &pk.Y_vec, &eA_minus_G0, &T1, &T2_vec, &T3);
+    c_prime == proof.c
 }
 
 /// Setup for VKA scheme. Returns public parameters.
@@ -147,27 +291,6 @@ pub fn vka_keygen<R: RngCore + CryptoRng>(
     )
 }
 
-/// TODO
-/// Helper: insecure placeholder "proof of knowledge" — hash the statement.
-/// Replace with a real NIZK system.
-fn insecure_proof_of_statement(A: &Point, e: &Scalar, messages: &[Point]) -> Proof {
-    let mut buf = Vec::new();
-    A.serialize_compressed(&mut buf).unwrap();
-    e.serialize_compressed(&mut buf).unwrap();
-    for m in messages {
-        m.serialize_compressed(&mut buf).unwrap();
-    }
-    let digest = Sha256::digest(&buf);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest[..]);
-    Proof { digest: out }
-}
-
-/// TODO
-/// Helper: verify the insecure placeholder proof
-fn insecure_verify_proof(A: &Point, e: &Scalar, messages: &[Point], proof: &Proof) -> bool {
-    insecure_proof_of_statement(A, e, messages).digest == proof.digest
-}
 
 /// Sign: A = (x+e)^(-1) * (G_0 + sum_j y_j M_j), plus NIZK over (A,e,M).
 pub fn vka_mac<R: RngCore + CryptoRng>(
@@ -175,6 +298,7 @@ pub fn vka_mac<R: RngCore + CryptoRng>(
     sk: &SecretKey,
     params: &Params,
     messages: &[Point],
+    pk_vka: &PublicKey, // for NIZK, so that we don't need to recompute it
 ) -> Result<Signature, VkaError> {
     let l = params.G_vec.len();
     if messages.len() != l {
@@ -202,9 +326,13 @@ pub fn vka_mac<R: RngCore + CryptoRng>(
     let inv = (sk.x + e).inverse().ok_or(VkaError::NonInvertible)?;
     let A = smul(&S, &inv);
 
-    // TODO: proof
-    // Placeholder proof
-     let proof = insecure_proof_of_statement(&A, &e, messages);
+    // Build a local pk-view from sk (no secret leakage; all recomputable)
+    // TODO: performance opt: pass pk as argument
+    // let local_pk = PublicKey {
+    //     X: smul(&params.G, &sk.x),
+    //     Y_vec: (0..l).map(|j| smul(&params.G_vec[j], &sk.y_vec[j])).collect(),
+    // };
+    let proof = nizk_prove_bbsvka(rng, params, &pk_vka, &A, &e, messages, sk);
 
     Ok(Signature { A, e, proof })
 }
@@ -224,10 +352,9 @@ pub fn vka_present<R: RngCore + CryptoRng>(
         return Err(VkaError::LengthMismatch { expected: l, got: pk.Y_vec.len() });
     }
 
-    // TODO: zkp verification
-    // Verify NIZK (placeholder)
-    if !insecure_verify_proof(&tau.A, &tau.e, messages, &tau.proof) {
-        // In real code, return an error; for now we can keep it strict:
+    let ok = nizk_verify_bbsvka(params, pk, &tau.A, &tau.e, messages, &tau.proof);
+    if !ok {
+        println!("vka_present: invalid MAC proof");
         return Err(VkaError::NonInvertible);
     }
 
@@ -366,7 +493,7 @@ mod bbs_vka_tests {
             .collect();
 
         // 4) Sign
-        let tau = vka_mac(&mut rng, &sk, &params, &messages)?;
+        let tau = vka_mac(&mut rng, &sk, &params, &messages, &pk)?;
 
         // 5) Present
         let pres = vka_present(&mut rng, &pk, &params, &tau, &messages)?;

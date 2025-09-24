@@ -293,7 +293,7 @@ pub fn verifier_keygen<R: RngCore + CryptoRng>(
     msgs.push(Z_0);
 
     // Ask issuer to MAC (using issuer's VKA secret)
-    let tau = vka_mac(rng, &isk.vka_sk, &pp.vka_params, &msgs)?;
+    let tau = vka_mac(rng, &isk.vka_sk, &pp.vka_params, &msgs, &ipk.vka_pk)?;
 
     let vsk = VerifierSecret { x_0_to_x_n: x_0_to_x_n };
     let vpk = VerifierPublic {
