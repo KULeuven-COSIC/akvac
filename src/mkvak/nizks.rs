@@ -3,7 +3,7 @@ use ark_std::rand::{CryptoRng, RngCore};
 use ark_std::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
-use crate::mkvak::mkvak::{IssuerPublic, PublicParams};
+use crate::mkvak::mkvak::{IssuerPublic, PublicParams, VerifierPublic};
 use crate::vka::bbs_vka::{
     smul, vka_keygen, vka_mac, vka_setup, Params as VkaParams, Point, Scalar, SecretKey as VkaSK,
     PublicKey as VkaPK, Signature as VkaSig, VkaError,
@@ -11,6 +11,7 @@ use crate::vka::bbs_vka::{
 
 const PROT_NAME_REQ: &[u8] = b"AKVAC-REQ";
 const PROT_NAME_ISSUE: &[u8] = b"AKVAC-ISSUE";
+const PROT_NAME_SHOW: &[u8] = b"AKVAC-SHOW";
 
 
 
@@ -45,7 +46,54 @@ pub struct IssProof {
     pub s_prod: Scalar // response for prod = e * u
 }
 
+/// Schnorr OR-proof for AKVAC presentation (cmzcpzshow)
+/// Honest prover knows witness for part (1): (\tildeγ, (a_j, γ_j)_{j=1..n})
+/// and simulates part (2) over statement X1.
+#[derive(Clone, Debug)]
+pub struct ShowProof {
+    // challenges for both branches
+    pub c1: Scalar, // for part (1)
+    pub c2: Scalar, // for part (2), simulated
 
+    // responses for part (1) witness:
+    pub s_tilde_gamma: Scalar,  // response for \tildeγ
+    pub s_attrs: Vec<Scalar>,   // responses for a_j
+    pub s_gamma_js: Vec<Scalar>,// responses for γ_j
+
+    // response for part (2) (scalar for x1 in φ^(2): x1 G = X1)
+    pub s2: Scalar,
+}
+
+fn hash_challenge_show(
+    pres_ctx: &[u8],
+    // statement:
+    X_1_to_n: &[Point],
+    tilde_U: &Point,
+    // part (1) announcement:
+    tZ: &Point,
+    tCj_vec: &[Point],
+    // part (2) announcement:
+    t2: &Point,
+) -> Scalar {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(PROT_NAME_SHOW);
+    buf.extend_from_slice(pres_ctx);
+
+    // statement
+    for Xj in X_1_to_n {
+        Xj.serialize_compressed(&mut buf).unwrap();
+    }
+    tilde_U.serialize_compressed(&mut buf).unwrap();
+
+    // announcements
+    tZ.serialize_compressed(&mut buf).unwrap();
+    for tCj in tCj_vec {
+        tCj.serialize_compressed(&mut buf).unwrap();
+    }
+    t2.serialize_compressed(&mut buf).unwrap();
+
+    hash_to_scalar(&buf)
+}
 
 
 
@@ -380,5 +428,120 @@ pub fn nizk_verify_req(
     // Recompute challenge
     let c_prime = hash_challenge_req(&s1, &s2, &s3, &s4, &s5, &s6, &u1, &u2, &u3, &u4, &u5, &u6);
     c_prime == proof.c
+}
+
+
+/// Prover for cmzcpzshow (OR-proof).
+/// Statement: (X_1..X_n, \tilde U, Z, (C_j)_1..n)
+/// Witness (part 1): (\tildeγ, (a_j, γ_j)_1..n)
+pub fn nizk_prove_show<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    pp: &PublicParams,
+    vpk: &VerifierPublic,
+    // statement pieces:
+    tilde_U: &Point,
+    Z: &Point,
+    C_j_vec: &[Point], // len = n
+    // witness for part (1):
+    tilde_gamma: &Scalar,
+    attrs: &[Scalar],      // a_j
+    gamma_js: &[Scalar],   // γ_j
+    // context to bind:
+    pres_ctx: &[u8],
+) -> ShowProof {
+    let n = vpk.X_1_to_n.len();
+    debug_assert_eq!(C_j_vec.len(), n);
+    debug_assert_eq!(attrs.len(), n);
+    debug_assert_eq!(gamma_js.len(), n);
+
+    // --- Simulate branch (2) over statement X1: φ^(2)(x1)=x1 G = X1 ---
+    let c2 = Scalar::rand(rng);
+    let s2 = Scalar::rand(rng);
+    // Announcement t2 = φ^(2)(s2) - c2 * X1 = s2 G - c2 X1
+    let t2 = smul(&pp.G, &s2) - smul(&vpk.X_1_to_n[0], &c2);
+
+    // --- Real branch (1) over (Z, (C_j)) with witness ---
+    // a-values (randomizers)
+    let a_tg = Scalar::rand(rng);
+    let a_attrs: Vec<Scalar>    = (0..n).map(|_| Scalar::rand(rng)).collect();
+    let a_gammas: Vec<Scalar>   = (0..n).map(|_| Scalar::rand(rng)).collect();
+
+    // Announcement for branch (1):
+    // tZ = sum_j a_γj X_j - a_tg * H
+    let mut tZ = Point::zero();
+    for j in 0..n {
+        tZ += smul(&vpk.X_1_to_n[j], &a_gammas[j]);
+    }
+    tZ -= smul(&pp.H, &a_tg);
+
+    // tCj_j = a_aj * \tilde U + a_γj * G
+    let mut tCj_vec = Vec::with_capacity(n);
+    for j in 0..n {
+        tCj_vec.push(smul(tilde_U, &a_attrs[j]) + smul(&pp.G, &a_gammas[j]));
+    }
+
+    // Fiat–Shamir total challenge
+    let c = hash_challenge_show(pres_ctx, &vpk.X_1_to_n, tilde_U, &tZ, &tCj_vec, &t2);
+
+    // Split: c1 = c - c2, c2 as above
+    let c1 = c - c2;
+
+    // Responses for branch (1): s = a + c1 * witness
+    let s_tilde_gamma = a_tg + c1 * *tilde_gamma;
+    let mut s_attrs: Vec<Scalar> = Vec::with_capacity(n);
+    let mut s_gamma_js: Vec<Scalar> = Vec::with_capacity(n);
+    for j in 0..n {
+        s_attrs.push(a_attrs[j]  + c1 * attrs[j]);
+        s_gamma_js.push(a_gammas[j] + c1 * gamma_js[j]);
+    }
+
+    ShowProof { c1, c2, s_tilde_gamma, s_attrs, s_gamma_js, s2 }
+}
+
+/// Verifier for cmzcpzshow.
+/// Checks the OR-proof and (your existing) linear relation separately.
+pub fn nizk_verify_show(
+    pp: &PublicParams,
+    vpk: &VerifierPublic,
+    pres_ctx: &[u8],
+    // statement:
+    tilde_U: &Point,
+    Z: &Point,
+    C_j_vec: &[Point], // len = n
+    // proof:
+    proof: &ShowProof,
+) -> bool {
+    let n = vpk.X_1_to_n.len();
+    if C_j_vec.len() != n { return false; }
+    if proof.s_attrs.len() != n || proof.s_gamma_js.len() != n { return false; }
+
+    // Recompute accepting announcements:
+
+    // Branch (1):
+    // For Z: uZ = (Σ s_γj X_j - s_tildeγ H) - c1 * Z
+    let mut uZ = Point::zero();
+    for j in 0..n {
+        uZ += smul(&vpk.X_1_to_n[j], &proof.s_gamma_js[j]);
+    }
+    uZ -= smul(&pp.H, &proof.s_tilde_gamma);
+    uZ -= smul(Z, &proof.c1);
+
+    // For each C_j: uCj = (s_aj \tilde U + s_γj G) - c1 * C_j
+    let mut uCj_vec = Vec::with_capacity(n);
+    for j in 0..n {
+        let u = smul(tilde_U, &proof.s_attrs[j]) + smul(&pp.G, &proof.s_gamma_js[j])
+            - smul(&C_j_vec[j], &proof.c1);
+        uCj_vec.push(u);
+    }
+
+    // Branch (2):
+    // u2 = s2 G - c2 X1
+    let u2 = smul(&pp.G, &proof.s2) - smul(&vpk.X_1_to_n[0], &proof.c2);
+
+    // Recompute total challenge:
+    let c_prime = hash_challenge_show(pres_ctx, &vpk.X_1_to_n, tilde_U, &uZ, &uCj_vec, &u2);
+
+    // Accept iff c1 + c2 == c'
+    proof.c1 + proof.c2 == c_prime
 }
 

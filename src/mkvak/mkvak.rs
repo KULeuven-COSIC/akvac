@@ -1,9 +1,10 @@
+use ark_ec::PrimeGroup;
 use ark_ff::{PrimeField, Zero};
 use ark_std::rand::{CryptoRng, RngCore};
 use ark_std::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
-use crate::mkvak::nizks::{IssProof, nizk_prove_issue, nizk_prove_req, nizk_verify_issue, nizk_verify_req, ReqProof};
+use crate::mkvak::nizks::{IssProof, nizk_prove_issue, nizk_prove_req, nizk_prove_show, nizk_verify_issue, nizk_verify_req, nizk_verify_show, ReqProof, ShowProof};
 use crate::vka::bbs_vka::{
     smul, vka_keygen, vka_mac, vka_setup, Params as VkaParams, Point, Scalar, SecretKey as VkaSK,
     PublicKey as VkaPK, Signature as VkaSig, VkaError,
@@ -110,7 +111,7 @@ pub struct Presentation {
     pub C_v: Point,
     pub C_j_vec: Vec<Point>,
     // C_1..C_n
-    pub nizk: Proof32,        // cmzcpzshow
+    pub nizk: ShowProof,        // cmzcpzshow
 }
 
 // ------------------------------------
@@ -421,8 +422,9 @@ pub fn issue_cred<R: RngCore + CryptoRng>(
     // Verify the VKA presentation (MAC correctness over C_j etc.)
     let verified = vfcred(isk, pp, &cred_req.vka_pres, &cred_req.C_j_vec)?;
     if !verified {
+        println!("AKVAC VKA presentation does not verify");
         return Err(AkvacError::Vka(VkaError::NonInvertible));
-    } else { println!("VKA presentation verified"); }
+    }
 
     // u ← Z_p,  ȗ = u G,  V̄ = u((X̄0 − e Z̄0) + C_attr)
     let u = Scalar::rand(rng);
@@ -584,7 +586,12 @@ pub fn show_cred<R: RngCore + CryptoRng>(
     }
 
     // Placeholder NIZK bound to (X_1..X_n, tilde_U, pres_ctx)
-    let nizk = prove_cmzcpzshow(&vpk.X_1_to_n, &tilde_U, &tilde_gamma, &cred.attrs, &gamma_j_vec, pres_ctx);
+    let nizk = nizk_prove_show(
+        rng, pp, vpk,
+        &tilde_U, &Z, &C_j_vec,
+        &tilde_gamma, &cred.attrs, &gamma_j_vec,
+        pres_ctx,
+    );
 
     Presentation {
         tilde_U: tilde_U,
@@ -600,27 +607,22 @@ pub fn show_cred<R: RngCore + CryptoRng>(
 /// - Check placeholder cmzcpzshow over (X_1..X_n, tilde_U, pres_ctx)
 /// - Check Z == x0*tilde_U + sum_j xj * C_j - C_V
 pub fn verify_cred_show(
+    pp: &PublicParams,
     vsk: &VerifierSecret,
     vpk: &VerifierPublic,
     pres: &Presentation,
     pres_ctx: &[u8],
 ) -> bool {
-    // NIZK check (placeholder)
-    // if !verify_cmzcpzshow(&vpk.X_1_to_n, &pres.tilde_U, pres_ctx, &pres.nizk) {
-    //     return false;
-    // }
+    if !nizk_verify_show(pp, vpk, pres_ctx, &pres.tilde_U, &pres.Z, &pres.C_j_vec, &pres.nizk) {
+        println!("AKVAC show proof does not verify");
+        return false;
+    }
 
     // Equation: Z ?= x0 * tilde_U + sum_j xj * C_j - C_V
     let mut rhs = smul(&pres.tilde_U, &vsk.x_0_to_x_n[0]);
-    // for (xj, Cj) in vsk.x_0_to_x_n.iter().skip(1).zip(pres.C_j_vec.iter()) {
-    //     rhs += smul(Cj, xj);
-    // }
-    println!(" x length = {}", vsk.x_0_to_x_n.len());
-    println!(" C length = {}", pres.C_j_vec.len());
+
     for i in 1..vsk.x_0_to_x_n.len() {
-        println!("verifier x_{} = {:?}", i, vsk.x_0_to_x_n[i]);
         let xj = &vsk.x_0_to_x_n[i];
-        println!("pres.C_j_vec[{}] = {:?}", i - 1, pres.C_j_vec[i - 1]);
         let Cj = &pres.C_j_vec[i - 1];
         rhs += smul(Cj, xj);
     }
@@ -756,7 +758,7 @@ mod akvac_tests {
         let pres_ctx = b"presentation context";
         let pres = show_cred(&mut rng, &pp, &ipk, &vpk, &cred, pres_ctx);
 
-        assert!(verify_cred_show(&vsk, &vpk, &pres, pres_ctx));
+        assert!(verify_cred_show(&pp, &vsk, &vpk, &pres, pres_ctx));
 
         Ok(())
     }
@@ -885,7 +887,7 @@ mod akvac_tests {
         let pres = show_cred(&mut rng, &pp, &ipk, &vpk, &cred, pres_ctx);
 
         // Verify
-        assert!(verify_cred_show(&vsk, &vpk, &pres, pres_ctx));
+        assert!(verify_cred_show(&pp, &vsk, &vpk, &pres, pres_ctx));
         Ok(())
     }
 }
