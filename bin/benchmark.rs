@@ -87,7 +87,7 @@ fn fmt_kib(bytes: usize) -> String {
 }
 
 // Sizes of artifacts you’ll likely report in a table:
-fn size_vka_sig(sig: &Signature) -> usize {
+fn size_saga_sig(sig: &Signature) -> usize {
     // A (Point) + e (Scalar) + MacProof { c, s_x, s_y_vec }
     let mut bytes = 0usize;
     bytes += ser_len_point(&sig.A);
@@ -97,9 +97,42 @@ fn size_vka_sig(sig: &Signature) -> usize {
     bytes += ser_len_scalar_vec(&sig.proof.s_y_vec);
     bytes
 }
-fn size_vka_present_tuple(pres: &SAGAPres, C_j_vec: &[Point]) -> usize {
+fn size_saga_present_tuple(pres: &SAGAPres, C_j_vec: &[Point]) -> usize {
     ser_len_point(&pres.C_A) + ser_len_point(&pres.T) + ser_len_point_vec(C_j_vec)
 }
+
+
+fn size_req_nizk(p: &ReqProof) -> usize {
+    let mut bytes = 0usize;
+    bytes += ser_len_scalar(&p.c);
+    bytes += ser_len_scalar(&p.s_s);
+    bytes += p.s_attrs.iter().map(ser_len_scalar).sum::<usize>();
+    bytes += p.s_xi_prime.iter().map(ser_len_scalar).sum::<usize>();
+    bytes += ser_len_scalar(&p.s_bar_x0);
+    bytes += ser_len_scalar(&p.s_bar_nu);
+    bytes += ser_len_scalar(&p.s_r);
+    bytes += ser_len_scalar(&p.s_e);
+    bytes += p.s_xi.iter().map(ser_len_scalar).sum::<usize>();
+    bytes += ser_len_scalar(&p.s_eta);
+    bytes += ser_len_scalar(&p.s_prod);
+    bytes += ser_len_scalar(&p.s_prod_prime);
+    bytes += ser_len_point(&p.prod_com);
+    bytes
+}
+
+// generic helper
+// #[inline]
+// fn ser_len<T: CanonicalSerialize>(x: &T) -> usize {
+//     let mut v = Vec::new();
+//     x.serialize_compressed(&mut v).unwrap();
+//     v.len()
+// }
+
+// Helper: serialized length for a slice of Points
+fn ser_len_points(xs: &[Point]) -> usize {
+    xs.iter().map(|p| ser_len_point(p)).sum()
+}
+
 fn size_req(credreq: &CredReq) -> usize {
     // (C_A, T) + C_j_vec + bar_X0 + bar_Z0 + C_attr + ReqProof
     let mut bytes = 0usize;
@@ -192,6 +225,7 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
     // Sizes — accumulate and average
     let mut bytes_tau = 0usize;
     let mut bytes_present_tuple = 0usize; // (C_A,T,C_j_vec)
+    let mut bytes_credreq = 0usize;
     let mut bytes_req = 0usize;
     let mut bytes_blind = 0usize;
     let mut bytes_cred = 0usize;
@@ -221,8 +255,8 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
         let (vsk, vpk) = verifier_keygen(&mut rng, &pp, &isk, &ipk)?;
         t_verifierkg.push(t0.elapsed().as_nanos());
 
-        // Artifact: tau size (VKA MAC)
-        let tau_size = size_vka_sig(&vpk.tau);
+        // Artifact: tau size (saga MAC)
+        let tau_size = size_saga_sig(&vpk.tau);
         bytes_tau += tau_size;
 
         // Prepare attrs
@@ -234,8 +268,11 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
         t_recv1.push(t0.elapsed().as_nanos());
 
         // artifact sizes from receive_cred_1:
-        bytes_present_tuple += size_vka_present_tuple(&cred_req.saga_pres, &cred_req.C_j_vec);
-        bytes_req += size_req(&cred_req);
+        // bytes_present_tuple += size_saga_present_tuple(&cred_req.saga_pres, &cred_req.C_j_vec);
+        // bytes_req += size_req(&cred_req);
+
+        // size creq
+        bytes_credreq += size_req(&cred_req);
 
         // issue_cred
         let t0 = Instant::now();
@@ -266,27 +303,29 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
         assert!(ok, "verification failed in benchmark");
     }
 
-    // Compute stats
+// Compute stats
     let (setup_mean, setup_std) = mean_std_ms(&t_setup);
     let (ikg_mean, ikg_std) = mean_std_ms(&t_issuerkg);
     let (vkg_mean, vkg_std) = mean_std_ms(&t_verifierkg);
-    let (r1_mean, r1_std) = mean_std_ms(&t_recv1);
+    let (r1_mean, r1_std)  = mean_std_ms(&t_recv1);
     let (iss_mean, iss_std) = mean_std_ms(&t_issue);
-    let (r2_mean, r2_std) = mean_std_ms(&t_recv2);
+    let (r2_mean, r2_std)  = mean_std_ms(&t_recv2);
     let (show_mean, show_std) = mean_std_ms(&t_show);
-    let (ver_mean, ver_std) = mean_std_ms(&t_verify);
+    let (ver_mean, ver_std)   = mean_std_ms(&t_verify);
 
     let r = rounds as f64;
-    let avg_tau = (bytes_tau as f64 / r).round() as usize;
-    let avg_present_tuple = (bytes_present_tuple as f64 / r).round() as usize;
-    let avg_req = (bytes_req as f64 / r).round() as usize;
+    let avg_tau   = (bytes_tau as f64 / r).round() as usize;
+// Option A (if you still have both counters):
+//     let avg_credreq = (((bytes_present_tuple + bytes_req) as f64) / r).round() as usize;
+// Option B (if you switched to a single counter bytes_credreq):
+    let avg_credreq = (bytes_credreq as f64 / r).round() as usize;
     let avg_blind = (bytes_blind as f64 / r).round() as usize;
-    let avg_cred = (bytes_cred as f64 / r).round() as usize;
-    let avg_pres = (bytes_pres as f64 / r).round() as usize;
+    let avg_cred  = (bytes_cred  as f64 / r).round() as usize;
+    let avg_pres  = (bytes_pres  as f64 / r).round() as usize;
 
-    // Print a compact Markdown row
+// Print a compact Markdown row (with 'credreq' instead of presTuple/req)
     println!(
-        "| {:>3} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>8.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>8.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>9} | {:>13} | {:>9} | {:>9} | {:>8} | {:>8} |",
+        "| {:>3} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>8.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>8.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>9} | {:>11} | {:>9} | {:>8} | {:>8} |",
         n,
         setup_mean, setup_std,
         ikg_mean, ikg_std,
@@ -297,11 +336,10 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
         show_mean, show_std,
         ver_mean, ver_std,
         fmt_kib(avg_tau),
-        fmt_kib(avg_present_tuple),
-        fmt_kib(avg_req),
+        fmt_kib(avg_credreq),
         fmt_kib(avg_blind),
         fmt_kib(avg_cred),
-        fmt_kib(avg_pres)
+        fmt_kib(avg_pres),
     );
 
     Ok(())
@@ -316,8 +354,8 @@ fn main() -> anyhow::Result<()> {
     println!();
     println!("Rounds: {}  |  Seed: {}", rounds, seed);
     println!();
-    println!("|  n  | setup [ms]       | issuerkg      | verifierkg    | receive_cred_1 | issue_cred    | receive_cred_2 | show_cred     | verify_show   | tau KiB | presTuple KiB | req KiB | blind KiB | cred KiB | pres KiB |");
-    println!("|-----|------------------|---------------|---------------|----------------|---------------|----------------|---------------|---------------|---------|---------------|---------|-----------|---------|---------|");
+    println!("|  n  | setup [ms]       | issuerkg      | verifierkg    | receive_cred_1 | issue_cred    | receive_cred_2 | show_cred     | verify_show   | tau KiB | credreq KiB | blind KiB | cred KiB | pres KiB |");
+    println!("|-----|------------------|---------------|---------------|----------------|---------------|----------------|---------------|---------------|---------|------------|-----------|---------|---------|");
 
     for &n in &ns {
         bench_for_n(n, rounds, seed)?;
