@@ -325,7 +325,7 @@ fn bench_for_n(n: usize, rounds: usize, seed: u64) -> anyhow::Result<()> {
 
 // Print a compact Markdown row (with 'credreq' instead of presTuple/req)
     println!(
-        "| {:>3} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>8.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>8.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2} | {:>9} | {:>11} | {:>9} | {:>8} | {:>8} |",
+        "|   {:>3}    |   {:>7.2} ± {:>5.2} | {:>7.2} ± {:>5.2}   |   {:>7.2} ± {:>5.2}   |  {:>8.2} ± {:>5.2}   |  {:>7.2} ± {:>5.2}  |  {:>8.2} ± {:>5.2} |  {:>7.2} ± {:>5.2}  |  {:>7.2} ± {:>5.2}   |  {:>9}  |  {:>11}  |  {:>9}   |  {:>8}    | {:>8} |",
         n,
         setup_mean, setup_std,
         ikg_mean, ikg_std,
@@ -354,8 +354,8 @@ fn main() -> anyhow::Result<()> {
     println!();
     println!("Rounds: {}  |  Seed: {}", rounds, seed);
     println!();
-    println!("|  n  | setup [ms]       | issuerkg      | verifierkg    | receive_cred_1 | issue_cred    | receive_cred_2 | show_cred     | verify_show   | tau KiB | credreq KiB | blind KiB | cred KiB | pres KiB |");
-    println!("|-----|------------------|---------------|---------------|----------------|---------------|----------------|---------------|---------------|---------|------------|-----------|---------|---------|");
+    println!("|   n      | setup [ms]        | issuerkg          |   verifierkg        |          obt_1      |     issue_cred    |          obt_2    |  present (ms)     | verify_show        | tau KiB.    | credreq KiB   | blind KiB    | cred KiB.    | pres KiB |");
+    println!("|----------|-------------------|-------------------|---------------------|---------------------|-------------------|-------------------|-------------------|--------------------|-------------|---------------|--------------|--------------|----------|");
 
     for &n in &ns {
         bench_for_n(n, rounds, seed)?;
