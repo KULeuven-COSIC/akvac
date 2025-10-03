@@ -10,6 +10,7 @@ use ark_std::{UniformRand, Zero};
 use rand::{CryptoRng, RngCore};
 use sha2::Sha256;
 use sha2::Digest;
+use rayon::prelude::*;
 
 /// Handy aliases
 pub type Scalar = ScalarField;
@@ -366,22 +367,40 @@ pub fn saga_present<R: RngCore + CryptoRng>(
     }
 
     // C_j = M_j + xi_j * G_j
-    let mut C_j_vec = Vec::with_capacity(l);
-    for j in 0..l {
-        let cj = messages[j] + smul(&params.G_vec[j], &xi_vec[j]);
-        C_j_vec.push(cj);
-    }
+    // let mut C_j_vec = Vec::with_capacity(l);
+    // for j in 0..l {
+    //     let cj = messages[j] + smul(&params.G_vec[j], &xi_vec[j]);
+    //     C_j_vec.push(cj);
+    // }
+    let C_j_vec: Vec<Point> = messages
+        .par_iter()
+        .zip(params.G_vec.par_iter())
+        .zip(xi_vec.par_iter())
+        .map(|((msg, Gj), xi)| *msg + smul(Gj, xi))
+        .collect();
 
     // C_A = A + r * G
     let C_A = tau.A + smul(&params.G, &r);
 
     // T = rX - e C_A + (e r) G - Σ xi_j Y_j
-    let mut T = smul(&pk.X, &r);         // rX
-    T -= smul(&C_A, &tau.e);                   // - e C_A
-    T += smul(&params.G, &(tau.e * r));        // + e r G
-    for j in 0..l {
-        T -= smul(&pk.Y_vec[j], &xi_vec[j]);       // - xi_j Y_j
-    }
+    // let mut T = smul(&pk.X, &r);         // rX
+    // T -= smul(&C_A, &tau.e);                   // - e C_A
+    // T += smul(&params.G, &(tau.e * r));        // + e r G
+    // for j in 0..l {
+    //     T -= smul(&pk.Y_vec[j], &xi_vec[j]);       // - xi_j Y_j
+    // }
+    // Parallel sum S = sum_j (xi_j * Y_j)
+    let sum_yxi: Point = pk.Y_vec
+        .par_iter()
+        .zip(xi_vec.par_iter())
+        .map(|(Yj, xij)| smul(Yj, xij))
+        .reduce(Point::zero, |a, b| a + b);
+
+    // T = rX - e C_A + e r G - sum_j xi_j Y_j
+    let mut T = smul(&pk.X, &r);              // rX
+    T -= smul(&C_A, &tau.e);                  // - e C_A
+    T += smul(&params.G, &(tau.e * r));       // + e r G
+    T -= sum_yxi;                             // - Σ xi_j Y_j
 
     Ok(PresentResult {
         saga_pres: SAGAPres { C_A, T },

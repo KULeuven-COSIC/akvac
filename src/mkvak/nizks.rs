@@ -8,6 +8,7 @@ use crate::saga::bbs_saga::{
     smul, saga_keygen, saga_mac, saga_setup, Params as VkaParams, Point, Scalar, SecretKey as VkaSK,
     PublicKey as VkaPK, Signature as VkaSig, SAGAError,
 };
+use rayon::prelude::*;
 
 const PROT_NAME_REQ: &[u8] = b"AKVAC-REQ";
 const PROT_NAME_ISSUE: &[u8] = b"AKVAC-ISSUE";
@@ -294,18 +295,39 @@ pub fn nizk_prove_req<R: RngCore + CryptoRng>(
     // T2 = - a_xi_{n+2} G_{n+2} + a_bar_nu G
     let t2 = -smul(&params.G_vec[n+1], &a_xi[n+1]) + smul(&params.G, &a_bar_nu);
     // T3 = a_s G + sum_j a_j C_j - sum_j a_xi'_j G_j  (j in 1..n; our arrays are 0..n-1)
-    let mut t3 = smul(&pp.G, &a_s);
-    for j in 0..n {
-        t3 += smul(&C_j_vec[j], &a_attrs[j]);
-        t3 -= smul(&params.G_vec[j], &a_xi_prime[j]);
-    }
+    // let mut t3 = smul(&pp.G, &a_s);
+    // for j in 0..n {
+    //     t3 += smul(&C_j_vec[j], &a_attrs[j]);
+    //     t3 -= smul(&params.G_vec[j], &a_xi_prime[j]);
+    // }
+    let sum_Ca: Point = C_j_vec
+        .par_iter()
+        .zip(a_attrs.par_iter())
+        .map(|(Cj, a)| smul(Cj, a))
+        .reduce(Point::zero, |acc, p| acc + p);
+
+    let sum_Gxi: Point = params.G_vec[..n]
+        .par_iter()
+        .zip(a_xi_prime.par_iter())
+        .map(|(Gj, xi)| smul(Gj, xi))
+        .reduce(Point::zero, |acc, p| acc + p);
+
+    let t3 = smul(&pp.G, &a_s) + sum_Ca - sum_Gxi;
     // T4 = a_r X - a_e C_A + a_prod G - sum_{j=1..l} a_xi_j Y_j
     let mut t4 = smul(&ipk.saga_pk.X, &a_r);
     t4 -= smul(&vka_pres.C_A, &a_e);
     t4 += smul(&pp.G, &a_prod);
-    for j in 0..l {
-        t4 -= smul(&ipk.saga_pk.Y_vec[j], &a_xi[j]);
-    }
+    // for j in 0..l {
+    //     t4 -= smul(&ipk.saga_pk.Y_vec[j], &a_xi[j]);
+    // }
+    // Parallel version:
+    let sum_Yxi: Point = ipk.saga_pk.Y_vec[..l]
+        .par_iter()
+        .zip(a_xi.par_iter())
+        .map(|(Yj, xi)| smul(Yj, xi))
+        .reduce(Point::zero, |acc, p| acc + p);
+
+    t4 -= sum_Yxi;
     // T5 = a_e G + a_eta H
     let t5 = smul(&pp.G, &a_e) + smul(&pp.H, &a_eta);
     // T6 = a_prod G + a_prod' H - a_r * ProdCom
@@ -324,23 +346,43 @@ pub fn nizk_prove_req<R: RngCore + CryptoRng>(
 
     // 5) responses s = a + c * witness
     let s_s = a_s + c * *s;
-    let mut s_attrs: Vec<Scalar> = Vec::with_capacity(n);
-    let mut s_xi_prime: Vec<Scalar> = Vec::with_capacity(n);
-    for j in 0..n {
-        s_attrs.push(a_attrs[j] + c * attrs[j]);
-        // xi'_j = a_j * xi_j  (witness value)
-        let xi_prime_j = attrs[j] * xi_vec[j];
-        s_xi_prime.push(a_xi_prime[j] + c * xi_prime_j);
-    }
+    // let mut s_attrs: Vec<Scalar> = Vec::with_capacity(n);
+    // let mut s_xi_prime: Vec<Scalar> = Vec::with_capacity(n);
+    // for j in 0..n {
+    //     s_attrs.push(a_attrs[j] + c * attrs[j]);
+    //     // xi'_j = a_j * xi_j  (witness value)
+    //     let xi_prime_j = attrs[j] * xi_vec[j];
+    //     s_xi_prime.push(a_xi_prime[j] + c * xi_prime_j);
+    // }
+    // parallel:
+    let (s_attrs, s_xi_prime): (Vec<Scalar>, Vec<Scalar>) = a_attrs
+        .par_iter()
+        .zip(attrs.par_iter())
+        .zip(xi_vec.par_iter())
+        .zip(a_xi_prime.par_iter())
+        .map(|(((a_attr, attr), xi), a_xi_p)| {
+            let s_attr = (*a_attr) + c * (*attr);
+            let xi_prime_j = (*attr) * (*xi);              // ξ'_j = a_j * ξ_j
+            let s_xip = (*a_xi_p) + c * xi_prime_j;
+            (s_attr, s_xip)
+        })
+        .unzip();
+
     let s_bar_x0 = a_bar_x0 + c * *bar_x0;
     let s_bar_nu = a_bar_nu + c * *bar_nu;
     let s_r = a_r + c * *r;
     let s_e = a_e + c * *e;
 
-    let mut s_xi: Vec<Scalar> = Vec::with_capacity(l);
-    for j in 0..l {
-        s_xi.push(a_xi[j] + c * xi_vec[j]);
-    }
+    // let mut s_xi: Vec<Scalar> = Vec::with_capacity(l);
+    // for j in 0..l {
+    //     s_xi.push(a_xi[j] + c * xi_vec[j]);
+    // }
+    // Parallel compute: s_xi[j] = a_xi[j] + c * xi_vec[j]
+    let s_xi: Vec<Scalar> = a_xi
+        .par_iter()
+        .zip(xi_vec.par_iter())
+        .map(|(axi, xi)| *axi + c * *xi)
+        .collect();
 
     let s_eta = a_eta + c * eta;
     let s_prod = a_prod + c * prod;
@@ -468,17 +510,32 @@ pub fn nizk_prove_show<R: RngCore + CryptoRng>(
 
     // Announcement for branch (1):
     // tZ = sum_j a_γj X_j - a_tg * H
-    let mut tZ = Point::zero();
-    for j in 0..n {
-        tZ += smul(&vpk.X_1_to_n[j], &a_gammas[j]);
-    }
-    tZ -= smul(&pp.H, &a_tg);
+    // let mut tZ = Point::zero();
+    // for j in 0..n {
+    //     tZ += smul(&vpk.X_1_to_n[j], &a_gammas[j]);
+    // }
+    // tZ -= smul(&pp.H, &a_tg);
+    // tZ = Σ_j a_gamma_j * X_j  −  a_tg * H
+    let tZ_sum = vpk
+        .X_1_to_n
+        .par_iter()
+        .zip(a_gammas.par_iter())
+        .map(|(Xj, a_gamma_j)| smul(Xj, a_gamma_j))
+        .reduce(|| Point::zero(), |acc, p| acc + p);
+
+    let mut tZ = tZ_sum - smul(&pp.H, &a_tg);
 
     // tCj_j = a_aj * \tilde U + a_γj * G
-    let mut tCj_vec = Vec::with_capacity(n);
-    for j in 0..n {
-        tCj_vec.push(smul(tilde_U, &a_attrs[j]) + smul(&pp.G, &a_gammas[j]));
-    }
+    // let mut tCj_vec = Vec::with_capacity(n);
+    // for j in 0..n {
+    //     tCj_vec.push(smul(tilde_U, &a_attrs[j]) + smul(&pp.G, &a_gammas[j]));
+    // }
+    // tCj_vec = [ smul(tilde_U, a_attr_j) + smul(G, a_gamma_j) ] for j=1..n
+    let tCj_vec: Vec<Point> = a_attrs
+        .par_iter()
+        .zip(a_gammas.par_iter())
+        .map(|(a_attr, a_gamma)| smul(tilde_U, a_attr) + smul(&pp.G, a_gamma))
+        .collect();
 
     // Fiat–Shamir total challenge
     let c = hash_challenge_show(pres_ctx, &vpk.X_1_to_n, tilde_U, &tZ, &tCj_vec, &t2);
@@ -488,12 +545,23 @@ pub fn nizk_prove_show<R: RngCore + CryptoRng>(
 
     // Responses for branch (1): s = a + c1 * witness
     let s_tilde_gamma = a_tg + c1 * *tilde_gamma;
-    let mut s_attrs: Vec<Scalar> = Vec::with_capacity(n);
-    let mut s_gamma_js: Vec<Scalar> = Vec::with_capacity(n);
-    for j in 0..n {
-        s_attrs.push(a_attrs[j]  + c1 * attrs[j]);
-        s_gamma_js.push(a_gammas[j] + c1 * gamma_js[j]);
-    }
+    // let mut s_attrs: Vec<Scalar> = Vec::with_capacity(n);
+    // let mut s_gamma_js: Vec<Scalar> = Vec::with_capacity(n);
+    // for j in 0..n {
+    //     s_attrs.push(a_attrs[j]  + c1 * attrs[j]);
+    //     s_gamma_js.push(a_gammas[j] + c1 * gamma_js[j]);
+    // }
+    let (s_attrs, s_gamma_js): (Vec<Scalar>, Vec<Scalar>) =
+        a_attrs.par_iter()
+            .zip(attrs.par_iter())
+            .zip(a_gammas.par_iter().zip(gamma_js.par_iter()))
+            .map(|((a_attr, attr), (a_gamma, gamma_j))| {
+                (
+                    *a_attr + c1 * attr,
+                    *a_gamma + c1 * gamma_j,
+                )
+            })
+            .unzip();
 
     ShowProof { c1, c2, s_tilde_gamma, s_attrs, s_gamma_js, s2 }
 }
@@ -519,20 +587,40 @@ pub fn nizk_verify_show(
 
     // Branch (1):
     // For Z: uZ = (Σ s_γj X_j - s_tildeγ H) - c1 * Z
-    let mut uZ = Point::zero();
-    for j in 0..n {
-        uZ += smul(&vpk.X_1_to_n[j], &proof.s_gamma_js[j]);
-    }
+    // let mut uZ = Point::zero();
+    // for j in 0..n {
+    //     uZ += smul(&vpk.X_1_to_n[j], &proof.s_gamma_js[j]);
+    // }
+    // uZ -= smul(&pp.H, &proof.s_tilde_gamma);
+    // uZ -= smul(Z, &proof.c1);
+    // Parallel sum of  Σ_j  s_gamma_js[j] * X_1_to_n[j]
+    let sum_X = vpk
+        .X_1_to_n
+        .par_iter()
+        .zip(proof.s_gamma_js.par_iter())
+        .map(|(Xj, gamma_j)| smul(Xj, gamma_j))
+        .reduce(|| Point::zero(), |a, b| a + b);
+
+    // Finish the expression
+    let mut uZ = sum_X;
     uZ -= smul(&pp.H, &proof.s_tilde_gamma);
     uZ -= smul(Z, &proof.c1);
 
     // For each C_j: uCj = (s_aj \tilde U + s_γj G) - c1 * C_j
-    let mut uCj_vec = Vec::with_capacity(n);
-    for j in 0..n {
-        let u = smul(tilde_U, &proof.s_attrs[j]) + smul(&pp.G, &proof.s_gamma_js[j])
-            - smul(&C_j_vec[j], &proof.c1);
-        uCj_vec.push(u);
-    }
+    // let mut uCj_vec = Vec::with_capacity(n);
+    // for j in 0..n {
+    //     let u = smul(tilde_U, &proof.s_attrs[j]) + smul(&pp.G, &proof.s_gamma_js[j])
+    //         - smul(&C_j_vec[j], &proof.c1);
+    //     uCj_vec.push(u);
+    // }
+    let uCj_vec: Vec<Point> = (0..n)
+        .into_par_iter()
+        .map(|j| {
+            smul(tilde_U, &proof.s_attrs[j])
+                + smul(&pp.G, &proof.s_gamma_js[j])
+                - smul(&C_j_vec[j], &proof.c1)
+        })
+        .collect();
 
     // Branch (2):
     // u2 = s2 G - c2 X1

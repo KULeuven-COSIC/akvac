@@ -9,6 +9,7 @@ use crate::saga::bbs_saga::{
     smul, saga_keygen, saga_mac, saga_setup, Params as SAGAParams, Point, Scalar, SecretKey as SagaSK,
     PublicKey as SagaPK, Signature as SAGASig, SAGAError,
 };
+use rayon::prelude::*;
 
 
 /// Public parameters for AKVAC
@@ -263,10 +264,19 @@ pub fn receive_cred_1<R: RngCore + CryptoRng>(
     let bar_Z0 = vpk.Z_0 + smul(&pp.G, &bar_v);
 
     // Commitment to attributes: C_attr = sum_j attr_j * X_j + s G
-    let mut C_attr = smul(&pp.G, &s);
-    for (a, Xj) in attrs.iter().zip(vpk.X_1_to_n.iter()) {
-        C_attr += smul(Xj, a);
-    }
+    // let mut C_attr = smul(&pp.G, &s);
+    // for (a, Xj) in attrs.iter().zip(vpk.X_1_to_n.iter()) {
+    //     C_attr += smul(Xj, a);
+    // }
+    // Parallel sum of a_j * X_j
+    let sum_ax: Point = attrs
+        .par_iter()
+        .zip(vpk.X_1_to_n.par_iter())
+        .map(|(a, Xj)| smul(Xj, a))
+        .reduce(Point::zero, |acc, p| acc + p);
+
+    // C_attr = sG + sum_j a_j X_j
+    let C_attr = smul(&pp.G, &s) + sum_ax;
 
     // Build C_j = M_j + ξ_j G_j were returned already in pres.C_j_vec
     // Assemble statement and placeholder proof
@@ -479,21 +489,38 @@ pub fn show_cred<R: RngCore + CryptoRng>(
     let tilde_V = smul(&cred.V, &gamma);
 
     // Z = sum_j γ_j X_j - tildeγ * H
-    let mut Z = Point::zero();
-    for (gamma_j, Xj) in gamma_j_vec.iter().zip(vpk.X_1_to_n.iter()) {
-        Z += smul(Xj, gamma_j);
-    }
-    Z -= smul(&pp.H, &tilde_gamma);
+    // let mut Z = Point::zero();
+    // for (gamma_j, Xj) in gamma_j_vec.iter().zip(vpk.X_1_to_n.iter()) {
+    //     Z += smul(Xj, gamma_j);
+    // }
+    // Z -= smul(&pp.H, &tilde_gamma);
+    // Z = Σ_j γ_j X_j  -  tilde_gamma * H
+    let sum_X = vpk
+        .X_1_to_n
+        .par_iter()
+        .zip(gamma_j_vec.par_iter())
+        .map(|(Xj, gamma_j)| smul(Xj, gamma_j))
+        .reduce(|| Point::zero(), |a, b| a + b);
+
+    let mut Z = sum_X - smul(&pp.H, &tilde_gamma);
 
     // C_V = tilde_V + tildeγ * H
     let C_v = tilde_V + smul(&pp.H, &tilde_gamma);
 
     // C_j = attr_j * tilde_U + γ_j * G
-    let mut C_j_vec = Vec::with_capacity(cred.attrs.len());
+    // let mut C_j_vec = Vec::with_capacity(cred.attrs.len());
+    // assert_eq!(cred.attrs.len(), gamma_j_vec.len());
+    // for (attr, gamma_j) in cred.attrs.iter().zip(gamma_j_vec.iter()) {
+    //     C_j_vec.push(smul(&tilde_U, attr) + smul(&pp.G, gamma_j));
+    // }
+    // C_j = attr_j * tilde_U + gamma_j * G
     assert_eq!(cred.attrs.len(), gamma_j_vec.len());
-    for (attr, gamma_j) in cred.attrs.iter().zip(gamma_j_vec.iter()) {
-        C_j_vec.push(smul(&tilde_U, attr) + smul(&pp.G, gamma_j));
-    }
+    let C_j_vec: Vec<Point> = cred
+        .attrs
+        .par_iter()
+        .zip(gamma_j_vec.par_iter())
+        .map(|(attr, gamma_j)| smul(&tilde_U, attr) + smul(&pp.G, gamma_j))
+        .collect();
 
     // Placeholder NIZK bound to (X_1..X_n, tilde_U, pres_ctx)
     let nizk = nizk_prove_show(
@@ -531,11 +558,22 @@ pub fn verify_cred_show(
     // Equation: Z ?= x0 * tilde_U + sum_j xj * C_j - C_V
     let mut rhs = smul(&pres.tilde_U, &vsk.x_0_to_x_n[0]);
 
-    for i in 1..vsk.x_0_to_x_n.len() {
-        let xj = &vsk.x_0_to_x_n[i];
-        let Cj = &pres.C_j_vec[i - 1];
-        rhs += smul(Cj, xj);
-    }
+    // for i in 1..vsk.x_0_to_x_n.len() {
+    //     let xj = &vsk.x_0_to_x_n[i];
+    //     let Cj = &pres.C_j_vec[i - 1];
+    //     rhs += smul(Cj, xj);
+    // }
+
+    rhs += (1..vsk.x_0_to_x_n.len())
+        .into_par_iter()
+        .map(|i| {
+            let xj = &vsk.x_0_to_x_n[i];
+            let Cj = &pres.C_j_vec[i - 1];
+            smul(Cj, xj)
+        })
+        .reduce(Point::zero, |a, b| a + b);
+
+
     rhs -= pres.C_v;
 
     pres.Z == rhs
